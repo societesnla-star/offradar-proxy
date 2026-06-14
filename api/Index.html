@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Offradar — Trouvez votre prochain emploi</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/docx@8.5.0/build/index.umd.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0B1C0D;color:#EDE8DC;min-height:100vh}
+input,textarea,button{font-family:inherit}
+::-webkit-scrollbar{width:5px}::-webkit-scrollbar-track{background:#0B1C0D}::-webkit-scrollbar-thumb{background:#1E3B21;border-radius:3px}
+@keyframes spin{to{transform:rotate(360deg)}}
+input:focus,textarea:focus{outline:none;border-color:#0F6E56!important}
+button:hover{opacity:.85}
+a{color:#9FE1CB;text-decoration:none}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+const {useState,useRef,createElement:h}=React;
+
+// Appel direct /api/jobs — même domaine, zéro CORS
+async function searchAdzuna(what,where,salMin,ct,page){
+  page=page||1;
+  var p=new URLSearchParams({what:what,where:where,results_per_page:"8",page:String(page)});
+  if(salMin)p.set("salary_min",String(salMin));
+  if(ct)p.set("contract_type",ct);
+  var r=await fetch("/api/jobs?"+p.toString());
+  if(!r.ok){var d=await r.json().catch(function(){return{};});throw new Error("Erreur "+r.status+(d.error?" : "+d.error:""));}
+  return(await r.json()).results||[];
+}
+
+async function extractPdfText(file){
+  var ab=await file.arrayBuffer();
+  var pdf=await pdfjsLib.getDocument({data:ab}).promise;
+  var text="";
+  for(var i=1;i<=Math.min(pdf.numPages,5);i++){
+    var page=await pdf.getPage(i);
+    var c=await page.getTextContent();
+    text+=c.items.map(function(x){return x.str;}).join(" ")+"\n";
+  }
+  return text.trim();
+}
+
+async function callClaude(prompt,system,maxTokens){
+  maxTokens=maxTokens||1000;
+  var r=await fetch("https://api.anthropic.com/v1/messages",{
+    method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:maxTokens,
+      ...(system&&{system:system}),messages:[{role:"user",content:prompt}]})
+  });
+  var d=await r.json();
+  if(d.error)throw new Error(d.error.message);
+  return d.content.map(function(b){return b.text||"";}).join("");
+}
+
+function safeJSON(str){
+  var c=(str||"").replace(/```json|```/g,"").trim();
+  try{return JSON.parse(c);}catch(e){}
+  var m=c.match(/\[[\s\S]*\]/)||c.match(/\{[\s\S]*\}/);
+  if(m)try{return JSON.parse(m[0]);}catch(e){}
+  return null;
+}
+
+async function dlDocx(text,fname){
+  var lines=text.split("\n").filter(function(l){return l.trim();});
+  var doc=new docx.Document({sections:[{properties:{page:{margin:{top:1440,right:1440,bottom:1440,left:1440}}},
+    children:lines.map(function(line){return new docx.Paragraph({
+      children:[new docx.TextRun({text:line,size:24,font:"Times New Roman"})],
+      spacing:{after:180},alignment:docx.AlignmentType.JUSTIFIED
+    });})}]});
+  var blob=await docx.Packer.toBlob(doc);
+  var a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download=fname.replace(/[^a-z0-9_\-.]/gi,"_")+".docx";
+  a.click();
+}
+
+function fmtSalary(min,max){
+  if(min&&max)return min.toLocaleString("fr-FR")+" – "+max.toLocaleString("fr-FR")+" €/an";
+  if(min)return"À partir de "+min.toLocaleString("fr-FR")+" €/an";
+  if(max)return"Jusqu'à "+max.toLocaleString("fr-FR")+" €/an";
+  return null;
+}
+
+var VALS=["Innovation","Impact social","Autonomie","Work-life balance","Croissance rapide","Diversité & inclusion","Engagement environnemental","Bienveillance","Excellence technique","Créativité","Transparence","International"];
+var CTRS=[{id:"CDI",label:"CDI",az:"permanent"},{id:"CDD",label:"CDD",az:"contract"},{id:"freelance",label:"Freelance",az:"contract"},{id:"temps_partiel",label:"Temps partiel",az:"part_time"},{id:"alternance",label:"Alternance",az:null}];
+var MOCK=[
+  {id:"1",title:"Product Designer Senior",company:{display_name:"Spendesk"},location:{display_name:"Paris 8e"},description:"Rejoignez une fintech européenne en plein essor. Culture bienveillante, télétravail partiel.",salary_min:52000,salary_max:65000,redirect_url:"https://spendesk.com",matchScore:94,matchReasons:["Portfolio UX/UI parfaitement aligné","Fintech stimulante","Package compétitif"]},
+  {id:"2",title:"UX Lead — Mobile First",company:{display_name:"Back Market"},location:{display_name:"Paris 11e"},description:"Leader mondial du reconditionné. Design system, A/B testing, impact sur des millions d'utilisateurs.",salary_min:58000,salary_max:72000,redirect_url:"https://backmarket.fr",matchScore:88,matchReasons:["Impact environnemental","Produit grand public","Équipe design reconnue"]},
+  {id:"3",title:"Design Strategist",company:{display_name:"LVMH Innovation"},location:{display_name:"Paris 1er"},description:"Définissez la stratégie design des maisons LVMH. Projets de prestige, rayonnement international.",salary_min:65000,salary_max:null,redirect_url:"#",matchScore:80,matchReasons:["Prestige international","Projets stratégiques","Cadre d'exception"]},
+  {id:"4",title:"Head of Product Design",company:{display_name:"Doctolib"},location:{display_name:"Levallois-Perret"},description:"Prenez la tête du design de la licorne française de la santé. Management d'une équipe de 12.",salary_min:null,salary_max:100000,redirect_url:"#",matchScore:74,matchReasons:["Mission santé publique","Leadership","Forte croissance"]}
+];
+
+var C={bg:"#0B1C0D",card:"#142916",border:"#1E3B21",accent:"#9EF87C",accentDark:"#0F6E56",accentLight:"#E1F5EE",text:"#EDE8DC",muted:"#7A9A7C",danger:"#FF6B6B"};
+function card(x){return Object.assign({background:C.card,border:"1px solid "+C.border,borderRadius:12,padding:"1.125rem 1.25rem"},x||{});}
+function btn(v){var b={display:"inline-flex",alignItems:"center",gap:6,padding:"8px 18px",borderRadius:8,border:"1px solid "+C.border,background:"transparent",color:C.text,fontSize:14,fontWeight:500,cursor:"pointer"};if(v==="primary")return Object.assign({},b,{background:C.accentDark,border:"none",color:C.accentLight});if(v==="ghost")return Object.assign({},b,{color:C.muted});return b;}
+function chip(on){return{display:"inline-flex",padding:"5px 13px",borderRadius:20,fontSize:12,cursor:"pointer",border:"1px solid "+(on?C.accentDark:C.border),background:on?"rgba(158,248,124,0.1)":"transparent",color:on?C.accent:C.muted,fontWeight:500};}
+function inp(x){return Object.assign({width:"100%",padding:"9px 13px",borderRadius:8,border:"1px solid "+C.border,background:C.card,color:C.text,fontSize:14,outline:"none",boxSizing:"border-box"},x||{});}
+
+function App(){
+  var s1=useState("upload");var step=s1[0];var setStep=s1[1];
+  var s2=useState("");var cvRaw=s2[0];var setCvRaw=s2[1];
+  var s3=useState(null);var cvData=s3[0];var setCvData=s3[1];
+  var s4=useState(false);var pdfLoading=s4[0];var setPdfLoading=s4[1];
+  var pr=useState({values:[],salMin:"",ctrs:[],trajet:45,cp:""});var prefs=pr[0];var setPrefs=pr[1];
+  var s5=useState("");var cpErr=s5[0];var setCpErr=s5[1];
+  var s6=useState([]);var allJobs=s6[0];var setAllJobs=s6[1];
+  var s7=useState(4);var visCount=s7[0];var setVisCount=s7[1];
+  var s8=useState(null);var selJob=s8[0];var setSelJob=s8[1];
+  var s9=useState("");var letter=s9[0];var setLetter=s9[1];
+  var s10=useState(false);var busy=s10[0];var setBusy=s10[1];
+  var s11=useState(0);var ldStep=s11[0];var setLdStep=s11[1];
+  var s12=useState("");var err=s12[0];var setErr=s12[1];
+  var s13=useState(false);var copied=s13[0];var setCopied=s13[1];
+  var fileRef=useRef();
+
+  function toggle(f,v){setPrefs(function(p){var arr=p[f];var next=arr.includes(v)?arr.filter(function(x){return x!==v;}):arr.concat([v]);return Object.assign({},p,{[f]:next});});}
+
+  async function handleFile(file){
+    if(!file)return;
+    if(file.type==="application/pdf"||file.name.endsWith(".pdf")){
+      setPdfLoading(true);
+      try{var t=await extractPdfText(file);if(t.length<30)throw new Error("PDF vide");setCvRaw(t);await parseCV(t);}
+      catch(e){alert("Impossible de lire ce PDF. Copiez-collez le texte à la place.");setPdfLoading(false);}
+    }else{
+      var r=new FileReader();r.onload=function(x){setCvRaw(x.target.result);};r.readAsText(file);
+    }
+  }
+
+  async function parseCV(text){
+    setBusy(true);setErr("");
+    try{
+      var raw=await callClaude("CV:\n"+text.slice(0,3000)+'\n\nRéponds UNIQUEMENT en JSON valide:\n{"name":"...","currentTitle":"...","skills":["..."],"experienceYears":0,"summary":"..."}',
+        "Expert RH. JSON valide uniquement, sans markdown.");
+      setCvData(safeJSON(raw)||{name:"Candidat",currentTitle:"Professionnel",skills:[],experienceYears:0});
+    }catch(e){setCvData({name:"Candidat",currentTitle:"Professionnel",skills:[],experienceYears:0});}
+    setBusy(false);setPdfLoading(false);setStep("prefs");
+  }
+
+  async function search(){
+    if(prefs.cp&&!/^\d{5}$/.test(prefs.cp)){setCpErr("Code postal invalide (5 chiffres)");return;}
+    setCpErr("");setStep("searching");setErr("");setLdStep(0);setVisCount(4);
+    try{
+      setLdStep(1);
+      var kw=(cvData&&cvData.skills&&cvData.skills.length?cvData.skills.slice(0,3).join(" "):null)||(cvData&&cvData.currentTitle)||"développeur";
+      var loc=prefs.cp||"Paris";
+      var ctObj=CTRS.find(function(c){return prefs.ctrs.includes(c.id);});
+      var rj;
+      try{rj=await searchAdzuna(kw,loc,prefs.salMin,ctObj?ctObj.az:null,1);}
+      catch(e){setErr(e.message);rj=MOCK;}
+      setLdStep(2);
+      if(rj.length&&rj!==MOCK){
+        var sn=rj.slice(0,8).map(function(j,i){return i+": "+j.title+" chez "+(j.company&&j.company.display_name)+" — "+(j.description||"").slice(0,100);}).join("\n");
+        try{
+          var raw=await callClaude("CV:"+JSON.stringify(cvData)+"\nPréfs:"+JSON.stringify(prefs)+"\nOffres:\n"+sn+'\nScore 0-100 + 3 raisons. JSON:[{"index":0,"score":85,"reasons":["..."]}]',"Expert RH. JSON uniquement.");
+          var sc=safeJSON(raw)||[];
+          rj=rj.slice(0,8).map(function(j,i){var s2=sc.find(function(x){return x.index===i;})||{score:60,reasons:["Profil compatible"]};return Object.assign({},j,{matchScore:s2.score,matchReasons:s2.reasons||[]});}).sort(function(a,b){return b.matchScore-a.matchScore;});
+        }catch(e){rj=rj.map(function(j){return Object.assign({},j,{matchScore:60,matchReasons:[]});});}
+      }
+      setLdStep(3);setAllJobs(rj);setStep("results");
+    }catch(e){setErr(e.message);setAllJobs(MOCK);setStep("results");}
+  }
+
+  async function generateLetter(job){
+    setSelJob(job);setStep("cover");setBusy(true);setLetter("");
+    try{
+      var txt=await callClaude(
+        "Génère une lettre de motivation professionnelle en français.\nCANDIDAT:"+JSON.stringify(cvData)+"\nPOSTE:"+job.title+" chez "+(job.company&&job.company.display_name)+"\nDESCRIPTION:"+(job.description||"").slice(0,400)+"\nVALEURS:"+(prefs.values.join(", ")||"non précisées")+"\nDate:"+new Date().toLocaleDateString("fr-FR")+". Structure: 3 paragraphes ciblés, formule de politesse soignée.",
+        "Expert lettres de motivation françaises. Lettre complète, naturelle, prête à envoyer.",1800);
+      setLetter(txt);
+    }catch(e){setLetter("Erreur: "+e.message+". Cliquez ↺ pour réessayer.");}
+    setBusy(false);
+  }
+
+  var stepsBar=["upload","prefs","searching","results","cover"];
+  var jobs=allJobs.slice(0,visCount);
+
+  return h("div",{style:{maxWidth:720,margin:"0 auto",padding:"2rem 1.5rem"}},
+
+    h("div",{style:{display:"flex",alignItems:"center",gap:10,marginBottom:"2.5rem"}},
+      h("div",{style:{width:36,height:36,borderRadius:10,background:C.accentDark,display:"flex",alignItems:"center",justifyContent:"center"}},
+        h("svg",{width:20,height:20,viewBox:"0 0 18 18",fill:"none"},
+          h("circle",{cx:7,cy:7,r:5,stroke:C.accentLight,strokeWidth:2}),
+          h("line",{x1:11,y1:11,x2:16,y2:16,stroke:C.accentLight,strokeWidth:2,strokeLinecap:"round"}))),
+      h("span",{style:{fontSize:20,fontWeight:700}},"Offradar"),
+      step!=="upload"&&h("div",{style:{marginLeft:"auto",display:"flex",gap:6}},
+        stepsBar.map(function(s2,i){return h("div",{key:s2,style:{width:7,height:7,borderRadius:"50%",background:stepsBar.indexOf(step)>=i?C.accentDark:C.border,transition:"background .3s"}});}))
+    ),
+
+    // UPLOAD
+    step==="upload"&&h("div",null,
+      h("h1",{style:{fontSize:42,fontWeight:800,lineHeight:1.1,marginBottom:14,letterSpacing:-1}},
+        "Trouvez votre",h("br"),"prochain poste,",h("br"),h("span",{style:{color:C.accent}},"sans effort.")),
+      h("p",{style:{color:C.muted,fontSize:15,lineHeight:1.7,marginBottom:32,maxWidth:460}},"Déposez votre CV (PDF ou texte) et laissez l'IA trouver les offres qui vous correspondent vraiment."),
+      h("div",{
+        onClick:function(){fileRef.current.click();},
+        onDragOver:function(e){e.preventDefault();},
+        onDrop:function(e){e.preventDefault();handleFile(e.dataTransfer.files[0]);},
+        style:card({textAlign:"center",padding:"2.5rem",cursor:"pointer",borderStyle:"dashed",marginBottom:12})
+      },
+        pdfLoading
+          ?h("div",null,h("div",{style:{width:36,height:36,borderRadius:"50%",border:"3px solid "+C.border,borderTopColor:C.accent,animation:"spin 1s linear infinite",margin:"0 auto 12px"}}),h("p",{style:{color:C.accent,fontWeight:500}},"Lecture du PDF…"))
+          :h("div",null,h("div",{style:{fontSize:40,marginBottom:10}},"📄"),h("p",{style:{fontWeight:600,fontSize:16,marginBottom:4}},"Déposer votre CV"),h("p",{style:{fontSize:13,color:C.muted}},"PDF ou .txt — ou cliquer pour sélectionner")),
+        h("input",{ref:fileRef,type:"file",accept:".pdf,.txt,.md",style:{display:"none"},onChange:function(e){handleFile(e.target.files[0]);}})
+      ),
+      h("p",{style:{textAlign:"center",fontSize:12,color:C.muted,margin:"12px 0"}},"— ou coller le texte —"),
+      h("textarea",{style:Object.assign(inp(),{minHeight:180,resize:"vertical",lineHeight:1.7,marginBottom:14,display:"block"}),
+        placeholder:"Jean Dupont\nDéveloppeur Full Stack — 5 ans d'expérience\n\nCompétences : React, Node.js...",
+        value:cvRaw,onChange:function(e){setCvRaw(e.target.value);}}),
+      h("button",{style:Object.assign(btn("primary"),{padding:"12px 28px",fontSize:15,...((!cvRaw.trim()||busy||pdfLoading)&&{opacity:.4,cursor:"default"})}),
+        onClick:function(){parseCV(cvRaw);},disabled:!cvRaw.trim()||busy||pdfLoading},
+        busy?"Analyse en cours…":"Analyser mon CV →")
+    ),
+
+    // PREFS
+    step==="prefs"&&h("div",null,
+      h("button",{onClick:function(){setStep("upload");},style:Object.assign(btn("ghost"),{marginBottom:"1.5rem",fontSize:13,padding:"6px 14px"})},"← Retour"),
+      cvData&&h("div",{style:card({marginBottom:24,background:"rgba(158,248,124,0.07)",borderColor:"rgba(15,110,86,0.5)"})},
+        h("p",{style:{fontSize:11,fontWeight:600,color:C.accentDark,letterSpacing:1,textTransform:"uppercase",marginBottom:4}},"CV analysé"),
+        h("p",{style:{fontWeight:600,fontSize:15}},cvData.name," — ",cvData.currentTitle),
+        cvData.skills&&cvData.skills.length>0&&h("p",{style:{fontSize:12,color:C.muted,marginTop:3}},cvData.skills.slice(0,6).join(" · "))),
+      h("h2",{style:{fontSize:28,fontWeight:700,marginBottom:6}},"Vos critères"),
+      h("p",{style:{color:C.muted,fontSize:14,marginBottom:28}},"Pour affiner la recherche"),
+      h("div",{style:{marginBottom:24}},
+        h("label",{style:{fontSize:14,color:C.text,fontWeight:500,marginBottom:8,display:"block"}},"Valeurs importantes (jusqu'à 4)"),
+        h("div",{style:{display:"flex",flexWrap:"wrap",gap:7}},
+          VALS.map(function(v){return h("button",{key:v,style:chip(prefs.values.includes(v)),onClick:function(){if(prefs.values.length<4||prefs.values.includes(v))toggle("values",v);}},v);}))),
+      h("div",{style:{marginBottom:24}},
+        h("label",{style:{fontSize:14,color:C.text,fontWeight:500,marginBottom:8,display:"block"}},"Type de contrat"),
+        h("div",{style:{display:"flex",flexWrap:"wrap",gap:7}},
+          CTRS.map(function(c){return h("button",{key:c.id,style:chip(prefs.ctrs.includes(c.id)),onClick:function(){toggle("ctrs",c.id);}},c.label);}))),
+      h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16,marginBottom:24}},
+        h("div",null,
+          h("label",{style:{fontSize:12,color:C.muted,fontWeight:500,marginBottom:5,display:"block"}},"Salaire minimum (€/an brut)"),
+          h("input",{style:inp(),type:"number",placeholder:"45000",value:prefs.salMin,onChange:function(e){setPrefs(function(p){return Object.assign({},p,{salMin:e.target.value});});}})),
+        h("div",null,
+          h("label",{style:{fontSize:12,color:C.muted,fontWeight:500,marginBottom:5,display:"block"}},"Code postal"),
+          h("input",{style:inp(cpErr?{borderColor:C.danger}:{}),type:"text",placeholder:"75011",maxLength:5,value:prefs.cp,onChange:function(e){setPrefs(function(p){return Object.assign({},p,{cp:e.target.value});});setCpErr("");}}),
+          cpErr&&h("p",{style:{fontSize:11,color:C.danger,marginTop:4}},cpErr))),
+      h("div",{style:{marginBottom:32}},
+        h("label",{style:{fontSize:12,color:C.muted,fontWeight:500,marginBottom:8,display:"block"}},"Temps de trajet max — ",h("strong",{style:{color:C.accent}},prefs.trajet," min")),
+        h("input",{type:"range",min:10,max:120,step:5,value:prefs.trajet,onChange:function(e){setPrefs(function(p){return Object.assign({},p,{trajet:+e.target.value});});},style:{width:"100%",accentColor:C.accent}}),
+        h("div",{style:{display:"flex",justifyContent:"space-between",fontSize:11,color:C.muted,marginTop:4}},h("span",null,"10 min"),h("span",null,"2h"))),
+      h("button",{style:Object.assign(btn("primary"),{padding:"12px 28px",fontSize:15}),onClick:search},"Trouver mes offres →")),
+
+    // SEARCHING
+    step==="searching"&&h("div",{style:{textAlign:"center",padding:"5rem 0"}},
+      h("div",{style:{width:60,height:60,borderRadius:"50%",border:"3px solid "+C.border,borderTopColor:C.accent,animation:"spin 1s linear infinite",margin:"0 auto 2rem"}}),
+      h("h2",{style:{fontSize:24,fontWeight:700,marginBottom:20}},"Recherche en cours…"),
+      h("div",{style:{maxWidth:300,margin:"0 auto",textAlign:"left"}},
+        ["Analyse du profil","Recherche sur Adzuna","Scoring par IA","Finalisation"].map(function(t,i){
+          return h("div",{key:i,style:{display:"flex",alignItems:"center",gap:10,marginBottom:12,opacity:ldStep>=i?1:0.3,transition:"opacity .4s"}},
+            h("div",{style:{width:22,height:22,borderRadius:"50%",flexShrink:0,background:ldStep>i?C.accentDark:"transparent",border:"2px solid "+(ldStep>=i?C.accent:C.border),display:"flex",alignItems:"center",justifyContent:"center"}},
+              ldStep>i&&h("svg",{width:10,height:8,viewBox:"0 0 10 8"},h("polyline",{points:"1,4 4,7 9,1",fill:"none",stroke:C.accentLight,strokeWidth:1.5,strokeLinecap:"round"}))),
+            h("span",{style:{fontSize:14,color:ldStep>=i?C.text:C.muted}},t));}))),
+
+    // RESULTS
+    step==="results"&&h("div",null,
+      h("button",{onClick:function(){setStep("prefs");},style:Object.assign(btn("ghost"),{marginBottom:24,fontSize:13,padding:"6px 14px"})},"← Modifier les critères"),
+      err&&h("div",{style:card({borderColor:C.danger,marginBottom:16})},
+        h("p",{style:{fontSize:12,fontWeight:600,color:C.danger,marginBottom:3}},"Connexion Adzuna échouée"),
+        h("p",{style:{fontSize:12,color:C.muted,lineHeight:1.6}},err," — Offres de démonstration affichées.")),
+      h("h2",{style:{fontSize:28,fontWeight:700,marginBottom:4}},allJobs.length," offre",allJobs.length>1?"s":""," trouvée",allJobs.length>1?"s":""),
+      h("p",{style:{color:C.muted,fontSize:14,marginBottom:24}},"Classées par correspondance",cvData&&cvData.name&&cvData.name!=="Candidat"?" pour "+cvData.name:""),
+      h("div",{style:{display:"flex",flexDirection:"column",gap:14}},
+        jobs.map(function(job,i){
+          var sal=fmtSalary(job.salary_min,job.salary_max);
+          return h("div",{key:job.id||i,style:card({borderColor:i===0?"rgba(15,110,86,0.6)":C.border,position:"relative",overflow:"hidden"})},
+            i===0&&h("div",{style:{position:"absolute",top:0,right:0,background:C.accentDark,color:C.accentLight,fontSize:11,fontWeight:600,padding:"4px 14px",borderRadius:"0 12px 0 8px"}},"Meilleur match"),
+            h("div",{style:{display:"flex",gap:14,alignItems:"flex-start",marginBottom:10}},
+              h("div",{style:{flex:1}},
+                h("h3",{style:{fontSize:18,fontWeight:700,marginBottom:4}},job.title),
+                h("p",{style:{fontSize:13,color:C.muted}},(job.company&&job.company.display_name)," · ",(job.location&&job.location.display_name))),
+              h("div",{style:{textAlign:"center",flexShrink:0}},
+                h("div",{style:{fontSize:26,fontWeight:800,color:C.accent}},job.matchScore,"%"),
+                h("div",{style:{fontSize:11,color:C.muted}},"match"))),
+            sal&&h("p",{style:{fontSize:13,color:C.accent,fontWeight:600,marginBottom:8}},sal),
+            h("p",{style:{fontSize:13,color:C.muted,lineHeight:1.7,marginBottom:10}},(job.description||"").slice(0,160),"…"),
+            job.matchReasons&&job.matchReasons.length>0&&h("div",{style:{display:"flex",flexWrap:"wrap",gap:6,marginBottom:12}},
+              job.matchReasons.map(function(r,j){return h("span",{key:j,style:{fontSize:11,padding:"3px 10px",borderRadius:20,background:"rgba(158,248,124,0.1)",color:C.accent,border:"1px solid rgba(158,248,124,0.25)"}},r);})),
+            h("div",{style:{display:"flex",gap:10,alignItems:"center"}},
+              h("button",{style:Object.assign(btn("primary"),{fontSize:13,padding:"7px 16px"}),onClick:function(){generateLetter(job);}},"✉ Générer ma lettre"),
+              job.redirect_url&&job.redirect_url!=="#"&&h("a",{href:job.redirect_url,target:"_blank",rel:"noreferrer",style:{fontSize:13,color:C.muted}},"Voir l'offre →")));
+        })),
+      visCount<allJobs.length&&h("div",{style:{textAlign:"center",marginTop:20}},
+        h("button",{style:btn("ghost"),onClick:function(){setVisCount(function(v){return v+4;});}},"Voir plus ↓"))),
+
+    // COVER
+    step==="cover"&&h("div",null,
+      h("button",{onClick:function(){setStep("results");},style:Object.assign(btn("ghost"),{marginBottom:24,fontSize:13,padding:"6px 14px"})},"← Retour aux offres"),
+      h("h2",{style:{fontSize:28,fontWeight:700,marginBottom:4}},"Lettre de motivation"),
+      h("p",{style:{color:C.muted,fontSize:14,marginBottom:24}},selJob&&selJob.title," · ",selJob&&selJob.company&&selJob.company.display_name),
+      busy
+        ?h("div",{style:{textAlign:"center",padding:"4rem 0"}},
+            h("div",{style:{width:50,height:50,borderRadius:"50%",border:"3px solid "+C.border,borderTopColor:C.accent,animation:"spin 1s linear infinite",margin:"0 auto 16px"}}),
+            h("p",{style:{color:C.muted}},"Rédaction en cours…"))
+        :h("div",null,
+            h("div",{style:card({whiteSpace:"pre-wrap",lineHeight:1.9,fontSize:14,maxHeight:460,overflowY:"auto",marginBottom:14})},letter),
+            h("div",{style:{display:"flex",gap:10,flexWrap:"wrap"}},
+              h("button",{style:Object.assign(btn("primary"),{padding:"10px 20px"}),onClick:function(){dlDocx(letter,"lettre_"+((selJob&&selJob.company&&selJob.company.display_name)||"poste"));}},"⬇ Télécharger .docx"),
+              h("button",{style:btn(),onClick:function(){navigator.clipboard.writeText(letter);setCopied(true);setTimeout(function(){setCopied(false);},2000);}},copied?"✓ Copié !":"Copier le texte"),
+              h("button",{style:btn("ghost"),onClick:function(){generateLetter(selJob);}},"↺ Régénérer"))))
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(h(App));
+</script>
+</body>
+</html>
