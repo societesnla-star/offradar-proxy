@@ -1,4 +1,4 @@
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
   if (req.method === "OPTIONS") { res.status(200).end(); return; }
@@ -8,6 +8,7 @@ export default async function handler(req, res) {
     const params = new URLSearchParams(qs);
     params.set("app_id", process.env.ADZUNA_ID || "");
     params.set("app_key", process.env.ADZUNA_KEY || "");
+
     const r = await fetch("https://api.adzuna.com/v1/api/jobs/fr/search/1?" + params);
     const data = await r.json();
     res.status(r.status).json(data);
